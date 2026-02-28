@@ -18,6 +18,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
   - `.github/pull_request_template.md`
 - Release workflow: `.github/workflows/publish.yml`.
 - Developer baseline files: `.editorconfig`, `.pre-commit-config.yaml`.
+- New env var: `REQABLE_MAX_IMPORT_FILE_SIZE` to guard HAR import size.
+- Tests for:
+  - compressed payload post-decode size limits
+  - accurate domain aggregation
+  - oversized HAR import rejection
 
 ### Changed
 
@@ -26,3 +31,13 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
   - tool descriptions
   - environment matrix
   - privacy and retention notes
+- `get_domains` now uses SQL aggregation for accurate counts and method sets.
+- `import_har` now applies max file size guard before loading file content.
+- Ingest now validates decoded payload size to prevent compressed-over-limit bypass.
+- Ingest startup error logging now uses cooldown to reduce repeated event spam on port conflicts.
+
+### Removed
+
+- Removed GitHub workflows by maintainer preference:
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/publish.yml`

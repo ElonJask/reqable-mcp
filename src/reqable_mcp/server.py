@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,8 @@ VALID_SEARCH_AREAS = {"all", "url", "request_body", "response_body"}
 VALID_LANGUAGES = {"python", "javascript", "typescript", "curl"}
 VALID_PYTHON_FRAMEWORKS = {"requests", "httpx"}
 VALID_JS_FRAMEWORKS = {"fetch", "axios"}
+START_ERROR_COOLDOWN_SECONDS = 10.0
+_last_start_error: tuple[str, float] | None = None
 
 
 def _json_response(data: Any) -> str:
@@ -45,11 +48,19 @@ def _bounded_limit(value: int, default: int, maximum: int) -> int:
 
 
 def _ensure_ingest_started() -> None:
+    global _last_start_error
     try:
         ingest_server.ensure_started()
     except OSError as exc:
+        message = str(exc)
+        now = time.monotonic()
+        if _last_start_error:
+            last_message, last_ts = _last_start_error
+            if message == last_message and (now - last_ts) < START_ERROR_COOLDOWN_SECONDS:
+                return
+        _last_start_error = (message, now)
         LOGGER.warning("Failed to start ingest server: %s", exc)
-        storage.add_event("error", "Failed to start ingest server", {"error": str(exc)})
+        storage.add_event("error", "Failed to start ingest server", {"error": message})
 
 
 @mcp.tool()
@@ -70,7 +81,10 @@ def import_har(file_path: str) -> str:
         return _json_response({"ok": False, "error": f"Not a file: {path}"})
 
     try:
-        result = storage.import_har_file(path)
+        result = storage.import_har_file(
+            path,
+            max_file_size_bytes=config.max_import_file_size,
+        )
         return _json_response({"ok": True, "file": str(path), **result})
     except Exception as exc:  # broad for robust tool UX
         storage.add_event("error", "import_har failed", {"file": str(path), "error": str(exc)})

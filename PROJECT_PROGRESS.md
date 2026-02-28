@@ -56,6 +56,15 @@
    - `proxypin` 改为 `npx -y proxypin-mcp@latest`
    - `reqable` 改为 `npx -y reqable-mcp@latest`
    - 已通过 `codex exec` 实测两者工具调用
+14. 按当前维护偏好移除 GitHub Actions：
+   - 删除 `.github/workflows/ci.yml`
+   - 删除 `.github/workflows/publish.yml`
+15. 完成一轮代码鲁棒性修复：
+   - `get_domains` 改为 SQL 聚合，避免因查询窗口截断导致统计失真
+   - `import_har` 增加文件大小限制（`REQABLE_MAX_IMPORT_FILE_SIZE`）
+   - ingest 解压后大小二次校验，拦截压缩绕过型超限 payload
+   - ingest 启动失败事件增加冷却，减少端口冲突时日志刷屏
+   - 新增对应测试用例并通过
 
 ### In Progress
 

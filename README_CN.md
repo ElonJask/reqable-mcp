@@ -86,6 +86,7 @@ uv run reqable-mcp
 | `REQABLE_DB_PATH` | SQLite 文件路径 | `${REQABLE_DATA_DIR}/requests.db` |
 | `REQABLE_MAX_BODY_SIZE` | 每条请求落库 body 最大字节数 | `102400` |
 | `REQABLE_MAX_REPORT_SIZE` | 单次上报最大字节数 | `10485760` |
+| `REQABLE_MAX_IMPORT_FILE_SIZE` | HAR 导入文件最大字节数 | `104857600` |
 | `REQABLE_RETENTION_DAYS` | 数据保留天数 | `7` |
 | `REQABLE_INGEST_TOKEN` | 可选本地鉴权 token | 未设置 |
 

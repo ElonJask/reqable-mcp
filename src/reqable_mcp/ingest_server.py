@@ -130,7 +130,23 @@ class IngestServerManager:
 
                 try:
                     raw = self.rfile.read(content_length)
+                    if len(raw) != content_length:
+                        raise ValueError(
+                            "incomplete body: "
+                            f"expected {content_length} bytes, got {len(raw)} bytes"
+                        )
                     decoded = manager._decode_body(raw, self.headers.get("Content-Encoding"))
+                    if len(decoded) > manager.config.max_report_size:
+                        manager._failed_payloads += 1
+                        self._send_json(
+                            413,
+                            {
+                                "ok": False,
+                                "error": "payload_too_large_after_decode",
+                                "max_report_size": manager.config.max_report_size,
+                            },
+                        )
+                        return
                     payload = json.loads(decoded.decode("utf-8", errors="replace"))
                 except Exception as exc:  # broad for protocol hardening
                     manager._failed_payloads += 1

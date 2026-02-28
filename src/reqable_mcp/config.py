@@ -15,6 +15,7 @@ DEFAULT_INGEST_PORT = 18765
 DEFAULT_INGEST_PATH = "/report"
 DEFAULT_MAX_BODY_SIZE = 1024 * 100  # 100KB
 DEFAULT_MAX_REPORT_SIZE = 10 * 1024 * 1024  # 10MB
+DEFAULT_MAX_IMPORT_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 DEFAULT_RETENTION_DAYS = 7
 
 
@@ -109,6 +110,15 @@ def get_max_report_size() -> int:
     )
 
 
+def get_max_import_file_size() -> int:
+    return _read_int_env(
+        "REQABLE_MAX_IMPORT_FILE_SIZE",
+        DEFAULT_MAX_IMPORT_FILE_SIZE,
+        minimum=1024,
+        maximum=1024 * 1024 * 1024,
+    )
+
+
 @dataclass
 class Config:
     data_dir: Path
@@ -120,6 +130,7 @@ class Config:
     max_body_size: int
     max_report_size: int
     retention_days: int
+    max_import_file_size: int = DEFAULT_MAX_IMPORT_FILE_SIZE
     default_list_limit: int = 20
     key_body_preview_length: int = 500
     summary_body_preview_length: int = 200
@@ -141,6 +152,7 @@ def load_config() -> Config:
         ingest_token=get_ingest_token(),
         max_body_size=get_max_body_size(),
         max_report_size=get_max_report_size(),
+        max_import_file_size=get_max_import_file_size(),
         retention_days=get_retention_days(),
     )
 

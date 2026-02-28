@@ -86,6 +86,7 @@ After saving, generate traffic and call `ingest_status` to verify incoming paylo
 | `REQABLE_DB_PATH` | SQLite file path | `${REQABLE_DATA_DIR}/requests.db` |
 | `REQABLE_MAX_BODY_SIZE` | Max persisted body bytes per request | `102400` |
 | `REQABLE_MAX_REPORT_SIZE` | Max accepted report payload bytes | `10485760` |
+| `REQABLE_MAX_IMPORT_FILE_SIZE` | Max HAR import file bytes | `104857600` |
 | `REQABLE_RETENTION_DAYS` | Local retention window | `7` |
 | `REQABLE_INGEST_TOKEN` | Optional local auth token | unset |
 

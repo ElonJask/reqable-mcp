@@ -260,7 +260,17 @@ class RequestStorage:
             self.prune_retention()
         return {"received": len(entries), "inserted": inserted, "updated": updated}
 
-    def import_har_file(self, file_path: Path) -> dict[str, int]:
+    def import_har_file(
+        self,
+        file_path: Path,
+        max_file_size_bytes: int | None = None,
+    ) -> dict[str, int]:
+        if max_file_size_bytes is not None:
+            file_size = file_path.stat().st_size
+            if file_size > max_file_size_bytes:
+                raise ValueError(
+                    f"HAR file too large: {file_size} bytes > {max_file_size_bytes} bytes"
+                )
         text = file_path.read_text(encoding="utf-8", errors="replace")
         try:
             payload = json.loads(text)
@@ -524,19 +534,34 @@ class RequestStorage:
         return matches
 
     def get_domains(self, limit: int = 500) -> list[dict[str, Any]]:
-        rows = self._query_rows(limit=limit)
-        domains: dict[str, dict[str, Any]] = {}
+        normalized_limit = max(1, min(limit, 2000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    host AS domain,
+                    COUNT(*) AS count,
+                    GROUP_CONCAT(DISTINCT UPPER(method)) AS methods
+                FROM requests
+                WHERE host IS NOT NULL AND host != ''
+                GROUP BY host
+                ORDER BY count DESC, domain ASC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+
+        result: list[dict[str, Any]] = []
         for row in rows:
-            host = row["host"]
-            if not host:
-                continue
-            entry = domains.setdefault(host, {"count": 0, "methods": set()})
-            entry["count"] += 1
-            entry["methods"].add(row["method"])
-        result = [
-            {"domain": domain, "count": info["count"], "methods": sorted(info["methods"])}
-            for domain, info in sorted(domains.items(), key=lambda item: -item[1]["count"])
-        ]
+            methods_raw = row["methods"] or ""
+            methods = sorted([item for item in methods_raw.split(",") if item])
+            result.append(
+                {
+                    "domain": row["domain"],
+                    "count": int(row["count"]),
+                    "methods": methods,
+                }
+            )
         return result
 
     def total_requests(self) -> int:

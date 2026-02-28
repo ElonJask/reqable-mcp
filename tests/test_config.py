@@ -17,3 +17,10 @@ def test_get_ingest_port_invalid_fallback(monkeypatch) -> None:
 def test_get_max_report_size_invalid_fallback(monkeypatch) -> None:
     monkeypatch.setenv("REQABLE_MAX_REPORT_SIZE", "abc")
     assert config_module.get_max_report_size() == config_module.DEFAULT_MAX_REPORT_SIZE
+
+
+def test_get_max_import_file_size_invalid_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("REQABLE_MAX_IMPORT_FILE_SIZE", "0")
+    assert (
+        config_module.get_max_import_file_size() == config_module.DEFAULT_MAX_IMPORT_FILE_SIZE
+    )
