@@ -1,0 +1,25 @@
+{
+  "name": "reqable-mcp",
+  "version": "0.1.0",
+  "description": "NPX launcher for reqable-mcp Python MCP server",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ElonJask/reqable-mcp.git",
+    "directory": "npm-bridge"
+  },
+  "homepage": "https://github.com/ElonJask/reqable-mcp",
+  "bugs": {
+    "url": "https://github.com/ElonJask/reqable-mcp/issues"
+  },
+  "bin": {
+    "reqable-mcp": "bin/reqable-mcp.js"
+  },
+  "files": [
+    "bin/reqable-mcp.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

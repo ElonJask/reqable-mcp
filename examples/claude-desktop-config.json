@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "reqable": {
+      "command": "npx",
+      "args": ["-y", "reqable-mcp@latest"]
+    }
+  }
+}
