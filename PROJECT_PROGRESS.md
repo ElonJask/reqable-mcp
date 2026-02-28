@@ -65,6 +65,17 @@
    - ingest 解压后大小二次校验，拦截压缩绕过型超限 payload
    - ingest 启动失败事件增加冷却，减少端口冲突时日志刷屏
    - 新增对应测试用例并通过
+16. 完成 0.1.1 全量验收与发布：
+   - 质量门禁：`ruff` 通过，`pytest` 11 项通过，`uv build` 通过
+   - 合成数据基准（10,000 条）：
+     - ingest：约 219.46ms
+     - `get_domains(limit=1)`：约 4.646ms（统计结果准确）
+     - `list_requests(limit=20)`：约 0.246ms
+     - `search_requests(limit=20)`：约 1.916ms
+   - 发布结果：
+     - PyPI：`reqable-mcp==0.1.1`
+     - npm：`reqable-mcp@0.1.1`
+   - 回归：`npx -y reqable-mcp@latest --help` 可启动
 
 ### In Progress
 
