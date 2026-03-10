@@ -63,6 +63,11 @@ def _first_header(headers: dict[str, list[str]], name: str) -> str | None:
     return None
 
 
+def _header_contains(headers: dict[str, list[str]], name: str, expected: str) -> bool:
+    value = _first_header(headers, name)
+    return value is not None and expected.lower() in value.lower()
+
+
 def _parse_query_params(parsed_url: Any) -> dict[str, str]:
     if not parsed_url.query:
         return {}
@@ -83,6 +88,187 @@ def _decode_response_text(content: dict[str, Any]) -> str:
         return decoded.decode("utf-8", errors="replace")
     except Exception:
         return text_value
+
+
+def _websocket_candidates(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in (
+        "_webSocketMessages",
+        "_websocketMessages",
+        "webSocketMessages",
+        "websocketMessages",
+        "websocket_frames",
+        "websocketFrames",
+        "messages",
+        "frames",
+    ):
+        value = entry.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _payload_dict(message: dict[str, Any]) -> dict[str, Any] | None:
+    payload = message.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_ws_direction(message: dict[str, Any]) -> str:
+    if "fromClient" in message:
+        return "outbound" if bool(message.get("fromClient")) else "inbound"
+    if "outgoing" in message:
+        return "outbound" if bool(message.get("outgoing")) else "inbound"
+    if "flow" in message:
+        try:
+            flow = int(message.get("flow"))
+        except (TypeError, ValueError):
+            flow = None
+        if flow == 0:
+            return "outbound"
+        if flow == 1:
+            return "inbound"
+
+    for field in ("direction", "side", "sender", "type"):
+        raw = _as_text(message.get(field)).strip().lower()
+        if raw in {"send", "sent", "out", "outbound", "client", "request", "up"}:
+            return "outbound"
+        if raw in {"receive", "received", "in", "inbound", "server", "response", "down"}:
+            return "inbound"
+    return "unknown"
+
+
+def _normalize_ws_opcode(message: dict[str, Any]) -> int | None:
+    raw = message.get("opcode")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+
+    payload = _payload_dict(message)
+    payload_type = payload.get("type") if payload else None
+    if payload_type == 2:
+        return 1
+    if payload_type == 6:
+        return 8
+    return None
+
+
+def _normalize_ws_message_type(message: dict[str, Any], opcode: int | None) -> str | None:
+    for field in ("messageType", "frameType", "frame_kind"):
+        raw = _as_text(message.get(field)).strip().lower()
+        if raw:
+            return raw
+    fallback = _as_text(message.get("type")).strip().lower()
+    if fallback in {"text", "binary", "close", "ping", "pong"}:
+        return fallback
+
+    payload = _payload_dict(message)
+    payload_type = payload.get("type") if payload else None
+    if payload_type == 2:
+        return "text"
+    if payload_type == 6:
+        return "close"
+
+    if opcode == 1:
+        return "text"
+    if opcode == 2:
+        return "binary"
+    if opcode == 8:
+        return "close"
+    if opcode == 9:
+        return "ping"
+    if opcode == 10:
+        return "pong"
+    return None
+
+
+def _extract_ws_close_details(message: dict[str, Any], data_json: Any) -> tuple[int | None, str | None]:
+    candidates: list[Any] = []
+    payload = _payload_dict(message)
+    if isinstance(payload, dict):
+        candidates.append(payload)
+    candidates.append(data_json)
+    candidates.append(message)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        code_raw = candidate.get("code")
+        code = None
+        if code_raw is not None:
+            try:
+                code = int(code_raw)
+            except (TypeError, ValueError):
+                code = None
+        reason_raw = candidate.get("reason")
+        reason = None
+        if reason_raw is not None:
+            reason_text = _as_text(reason_raw).strip()
+            reason = reason_text or None
+        if code is not None or reason is not None:
+            return code, reason
+    return None, None
+
+
+def _extract_ws_payload(message: dict[str, Any]) -> str:
+    for key in ("data", "text", "payload", "payloadData", "body", "content"):
+        if key not in message or message.get(key) is None:
+            continue
+        value = message.get(key)
+        if isinstance(value, dict):
+            for nested_key in ("text", "data", "payload", "payloadData", "body", "content"):
+                if nested_key in value and value.get(nested_key) is not None:
+                    return _as_text(value.get(nested_key))
+        return _as_text(value)
+    return ""
+
+
+def normalize_websocket_message(
+    message: dict[str, Any],
+    max_body_size: int,
+    seq: int,
+) -> dict[str, Any]:
+    payload_raw = _extract_ws_payload(message)
+    payload, truncated = truncate_body(payload_raw, max_body_size)
+    opcode = _normalize_ws_opcode(message)
+    message_type = _normalize_ws_message_type(message, opcode)
+    data_json = parse_json_if_possible(payload)
+    close_code, close_reason = _extract_ws_close_details(message, data_json)
+    is_binary = bool(message.get("binary")) or message_type == "binary" or opcode == 2
+    encoding = _as_text(message.get("encoding")).strip() or None
+    return {
+        "seq": seq,
+        "direction": _normalize_ws_direction(message),
+        "timestamp": _as_text(
+            message.get("time")
+            or message.get("timestamp")
+            or message.get("createdDateTime")
+            or message.get("dateTime")
+            or message.get("sentDateTime")
+            or message.get("receivedDateTime")
+        ).strip()
+        or None,
+        "opcode": opcode,
+        "message_type": message_type,
+        "data": payload or None,
+        "data_json": data_json,
+        "is_binary": is_binary,
+        "encoding": encoding,
+        "body_truncated": truncated,
+        "close_code": close_code,
+        "close_reason": close_reason,
+        "raw": message,
+    }
+
+
+def _normalize_websocket_messages(
+    entry: dict[str, Any],
+    max_body_size: int,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, message in enumerate(_websocket_candidates(entry), start=1):
+        normalized.append(normalize_websocket_message(message, max_body_size=max_body_size, seq=index))
+    return normalized
 
 
 def extract_entries(payload: Any) -> list[dict[str, Any]]:
@@ -139,7 +325,9 @@ def normalize_entry(
 
     request_body, request_truncated = truncate_body(request_body_raw, max_body_size)
     response_body, response_truncated = truncate_body(response_body_raw, max_body_size)
-    body_truncated = request_truncated or response_truncated
+    websocket_messages = _normalize_websocket_messages(entry, max_body_size)
+    websocket_truncated = any(item["body_truncated"] for item in websocket_messages)
+    body_truncated = request_truncated or response_truncated or websocket_truncated
 
     content_type = (
         _as_text(post_data.get("mimeType")).strip()
@@ -158,8 +346,21 @@ def normalize_entry(
     except (TypeError, ValueError):
         duration_ms = None
 
+    is_websocket = bool(websocket_messages)
+    if not is_websocket:
+        resource_type = _as_text(entry.get("_resourceType") or entry.get("resourceType")).strip().lower()
+        is_websocket = resource_type == "websocket"
+    if not is_websocket:
+        is_websocket = parsed.scheme.lower() in {"ws", "wss"}
+    if not is_websocket:
+        is_websocket = (
+            status == 101
+            and _header_contains(request_headers, "Upgrade", "websocket")
+            and _header_contains(response_headers, "Upgrade", "websocket")
+        )
+
     has_auth = _first_header(request_headers, "Authorization") is not None
-    is_https = parsed.scheme.lower() == "https"
+    is_https = parsed.scheme.lower() in {"https", "wss"}
     record_id = _entry_id(entry, request_body, status)
 
     return {
@@ -188,4 +389,7 @@ def normalize_entry(
         "source": source,
         "platform": platform,
         "reporter_host": reporter_host,
+        "is_websocket": is_websocket,
+        "websocket_messages": websocket_messages,
+        "raw_entry": entry,
     }

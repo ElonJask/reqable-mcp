@@ -16,6 +16,22 @@ class DetailLevel(str, Enum):
     FULL = "full"
 
 
+class WebSocketMessage(BaseModel):
+    seq: int
+    direction: str
+    timestamp: str | None = None
+    opcode: int | None = None
+    message_type: str | None = None
+    data: str | None = None
+    data_json: Any | None = None
+    is_binary: bool = False
+    encoding: str | None = None
+    body_truncated: bool = False
+    close_code: int | None = None
+    close_reason: str | None = None
+    raw: dict[str, Any] | None = None
+
+
 class RequestSummary(BaseModel):
     id: str
     method: str
@@ -25,6 +41,8 @@ class RequestSummary(BaseModel):
     status: int | None = None
     duration_ms: int | None = None
     timestamp: str | None = None
+    is_websocket: bool = False
+    websocket_message_count: int = 0
 
 
 class RequestKey(BaseModel):
@@ -45,6 +63,8 @@ class RequestKey(BaseModel):
     has_auth: bool = False
     is_json: bool = False
     body_truncated: bool = False
+    is_websocket: bool = False
+    websocket_message_count: int = 0
 
 
 class RequestFull(BaseModel):
@@ -72,6 +92,10 @@ class RequestFull(BaseModel):
     body_truncated: bool = False
     source: str | None = None
     platform: str | None = None
+    is_websocket: bool = False
+    websocket_message_count: int = 0
+    websocket_messages: list[WebSocketMessage] = Field(default_factory=list)
+    raw_entry: dict[str, Any] | None = None
 
     def to_curl(self) -> str:
         parts = [f"curl -X {shlex.quote(self.method.upper())}"]

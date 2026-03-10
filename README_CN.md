@@ -17,7 +17,8 @@
 - 本地优先、隐私优先。
 - 基于 Report Server 的近实时上报。
 - 支持 HAR 文件补录兜底。
-- 请求列表、检索、域名统计、API 结构分析、代码生成。
+- HTTP 请求列表、检索、域名统计、API 结构分析。
+- 支持解析带 WebSocket 帧扩展字段的 HAR 会话与消息。
 - 跨平台可用（macOS / Linux / Windows，Python 3.10+）。
 
 ## 前置条件
@@ -64,16 +65,25 @@ uv run reqable-mcp
 
 保存后产生一点请求流量，再调用 `ingest_status` 验证计数是否增长。
 
+重要说明：Reqable 本体支持 WebSocket 调试，但当前官方 Report Server 文档描述的是“已完成的 HTTP 会话”HAR 上报。`reqable-mcp` 的接收端目前只监听 HTTP，不提供原生 WebSocket 监听端点；WebSocket 数据的支持方式是解析 HAR / 上报 payload 中携带的帧扩展字段（例如 `_webSocketMessages`）。当前实现会保留原始 entry JSON 与原始消息 JSON，并通过 `get_request`、`get_websocket_session`、`search_websocket_messages` 透传；如果实时上报里没有帧数据，建议从 Reqable 导出 HAR 后再用 `import_har` 补录。
+
 ## 可用工具
 
 - `ingest_status`：查看接收端状态和计数
 - `import_har`：从 HAR 文件导入
-- `list_requests`：按条件列出请求
-- `get_request`：按 ID 查询明细
-- `search_requests`：按关键字检索 URL/Body
+- `list_requests`：按条件列出 HTTP / WebSocket 握手请求
+- `get_request`：按 ID 查询请求明细（完整模式会返回 `raw_entry`）
+- `search_requests`：按关键字检索 HTTP URL / Body / 原始上报条目（`raw` / `raw_entry`）
+- `list_websocket_sessions`：列出 WebSocket 会话
+- `get_websocket_session`：按 ID 查询 WebSocket 会话及消息（含 `raw_entry` 与每条消息 `raw`）
+- `search_websocket_messages`：按关键字、方向、类型、opcode、close code、域名、请求 ID 等精确检索 WebSocket 消息
+- `analyze_websocket_session`：汇总会话方向、消息类型、JSON 结构、close 事件
+- `export_websocket_session_raw`：导出 WebSocket 会话原始 entry 与原始帧列表
+- `health_report`：返回接收状态 + WebSocket 数据质量报告
+- `repair_websocket_messages`：根据 raw 帧回填缺失字段（可 dry-run）
 - `get_domains`：按域名聚合统计
 - `analyze_api`：分析某域名 API 结构
-- `generate_code`：从抓包生成调用代码
+- `generate_code`：从 HTTP 抓包生成调用代码
 
 ## 环境变量
 
@@ -84,7 +94,7 @@ uv run reqable-mcp
 | `REQABLE_INGEST_PATH` | 接收服务路径 | `/report` |
 | `REQABLE_DATA_DIR` | 本地数据目录 | 平台默认应用数据目录 |
 | `REQABLE_DB_PATH` | SQLite 文件路径 | `${REQABLE_DATA_DIR}/requests.db` |
-| `REQABLE_MAX_BODY_SIZE` | 每条请求落库 body 最大字节数 | `102400` |
+| `REQABLE_MAX_BODY_SIZE` | 每条请求/消息落库 body 最大字节数 | `102400` |
 | `REQABLE_MAX_REPORT_SIZE` | 单次上报最大字节数 | `10485760` |
 | `REQABLE_MAX_IMPORT_FILE_SIZE` | HAR 导入文件最大字节数 | `104857600` |
 | `REQABLE_RETENTION_DAYS` | 数据保留天数 | `7` |
@@ -93,7 +103,7 @@ uv run reqable-mcp
 ## 隐私与保留策略
 
 - 默认模式下数据仅存本机。
-- 过期数据会按保留窗口自动清理。
+- 过期数据会按保留窗口自动清理，包含 WebSocket 消息。
 - 若接收端离线，Reqable 对失败上报默认不重试，该次数据会丢失。
 
 ## 许可证

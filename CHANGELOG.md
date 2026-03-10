@@ -6,6 +6,27 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-10
+
+### Added
+
+- WebSocket governance and diagnostics:
+  - `health_report` tool with data quality metrics and samples.
+  - `repair_websocket_messages` tool to backfill missing WebSocket fields from raw frames (supports dry-run).
+  - `reqable://health` MCP resource.
+- WebSocket analysis and export tools:
+  - `analyze_websocket_session` session summary (directions, message types, JSON shapes, close events).
+  - `export_websocket_session_raw` to export raw entry and raw frame list.
+- Close-frame details promoted to first-class fields (`close_code`, `close_reason`) on WebSocket messages.
+- Extended WebSocket message search filters (direction, type, opcode, close code, request id, domain, has_json).
+- Data quality and repair test coverage for WebSocket health and backfill.
+
+### Changed
+
+- WebSocket normalization/ingest now preserves richer raw fields and close semantics.
+- WebSocket message search uses expanded candidate windows to avoid missing rare frames under filter-only queries.
+- README (EN/CN) updated with new tools and governance workflow.
+
 ## [0.1.1] - 2026-02-28
 
 ### Added

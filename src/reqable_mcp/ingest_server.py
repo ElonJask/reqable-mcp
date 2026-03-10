@@ -233,6 +233,9 @@ class IngestServerManager:
             "ok": True,
             "mode": "local",
             "listening": listening,
+            "ingest_transport": "http",
+            "supports_raw_websocket_listener": False,
+            "supports_websocket_capture": True,
             "ingest_url": self.config.ingest_url,
             "host": self.config.ingest_host,
             "port": self.config.ingest_port,
@@ -243,6 +246,8 @@ class IngestServerManager:
             "last_error": self._last_error,
             "db_path": str(self.storage.db_path),
             "total_requests": self.storage.total_requests(),
+            "total_websocket_sessions": self.storage.total_websocket_sessions(),
+            "total_websocket_messages": self.storage.total_websocket_messages(),
         }
         if include_events:
             result["recent_events"] = self.storage.recent_events(limit=10)

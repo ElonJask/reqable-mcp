@@ -58,6 +58,69 @@ def test_ingest_server_roundtrip(tmp_path: Path) -> None:
         manager.stop()
 
 
+def test_ingest_server_reports_http_listener_and_websocket_capture(tmp_path: Path) -> None:
+    port = _free_port()
+    cfg = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "requests.db",
+        ingest_host="127.0.0.1",
+        ingest_port=port,
+        ingest_path="/report",
+        ingest_token=None,
+        max_body_size=102400,
+        max_report_size=10 * 1024 * 1024,
+        retention_days=7,
+    )
+    storage = RequestStorage(
+        db_path=cfg.db_path,
+        max_body_size=cfg.max_body_size,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=cfg.retention_days,
+    )
+    storage.ingest_payload(
+        {
+            "log": {
+                "entries": [
+                    {
+                        "_resourceType": "websocket",
+                        "startedDateTime": "2026-02-28T09:01:00.000Z",
+                        "request": {
+                            "method": "GET",
+                            "url": "wss://ws.example.com/socket",
+                            "headers": [
+                                {"name": "Connection", "value": "Upgrade"},
+                                {"name": "Upgrade", "value": "websocket"},
+                            ],
+                        },
+                        "response": {
+                            "status": 101,
+                            "headers": [
+                                {"name": "Connection", "value": "Upgrade"},
+                                {"name": "Upgrade", "value": "websocket"},
+                            ],
+                        },
+                        "_webSocketMessages": [
+                            {"type": "send", "opcode": 1, "data": '{"ping":true}'},
+                            {"type": "receive", "opcode": 1, "data": '{"pong":true}'},
+                        ],
+                    }
+                ]
+            }
+        },
+        source="har_import",
+    )
+    manager = IngestServerManager(config=cfg, storage=storage)
+    status = manager.status(include_events=False)
+
+    assert status["ingest_transport"] == "http"
+    assert status["supports_raw_websocket_listener"] is False
+    assert status["supports_websocket_capture"] is True
+    assert status["total_requests"] == 1
+    assert status["total_websocket_sessions"] == 1
+    assert status["total_websocket_messages"] == 2
+
+
 def test_ingest_server_rejects_large_decoded_payload(tmp_path: Path) -> None:
     port = _free_port()
     cfg = Config(
