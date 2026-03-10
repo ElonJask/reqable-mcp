@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from .models import (
     DetailLevel,
@@ -64,6 +65,69 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def _event_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text
+
+
+def _event_type(event: dict[str, Any]) -> str:
+    return str(event.get("event_type") or event.get("type") or "").strip().lower()
+
+
+def _extract_ws_events(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        events = payload.get("events")
+        if isinstance(events, list):
+            return [item for item in events if isinstance(item, dict)]
+        if isinstance(payload.get("event"), dict):
+            return [payload["event"]]
+        if any(key in payload for key in ("session_id", "request_id", "event_type", "type")):
+            return [payload]
+        return []
+
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _normalize_headers(value: Any) -> dict[str, list[str]]:
+    headers: dict[str, list[str]] = {}
+    if isinstance(value, dict):
+        for key, raw in value.items():
+            name = str(key).strip()
+            if not name:
+                continue
+            if isinstance(raw, list):
+                vals = [str(item) for item in raw if item is not None]
+            elif raw is None:
+                vals = [""]
+            else:
+                vals = [str(raw)]
+            headers[name] = vals
+        return headers
+
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            headers.setdefault(name, []).append(str(item.get("value") or ""))
+        return headers
+    return headers
+
+
+def _query_params_from_url(url: str) -> tuple[str | None, dict[str, str]]:
+    parsed = urlparse(url)
+    query_string = parsed.query or None
+    query_params: dict[str, str] = {}
+    if parsed.query:
+        for key, values in parse_qs(parsed.query).items():
+            query_params[key] = values[0] if len(values) == 1 else json.dumps(values, ensure_ascii=False)
+    return query_string, query_params
 
 
 class RequestStorage:
@@ -173,6 +237,8 @@ class RequestStorage:
                     ON websocket_messages(request_id, seq);
                 CREATE INDEX IF NOT EXISTS idx_websocket_messages_direction
                     ON websocket_messages(direction);
+                CREATE INDEX IF NOT EXISTS idx_websocket_messages_created_at
+                    ON websocket_messages(created_at DESC, request_id, seq);
 
                 CREATE TABLE IF NOT EXISTS ingest_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,6 +336,461 @@ class RequestStorage:
                 ),
             )
 
+    def _upsert_request_record(self, conn: sqlite3.Connection, record: dict[str, Any]) -> bool:
+        existing = conn.execute(
+            "SELECT 1 FROM requests WHERE id = ?",
+            (record["id"],),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO requests(
+                id, method, url, host, path, query_string, query_params,
+                status, status_text, duration_ms, timestamp,
+                request_headers, response_headers,
+                request_body, response_body,
+                request_body_json, response_body_json,
+                content_type, has_auth, is_https, body_truncated,
+                remote_ip, source, platform, reporter_host, raw_entry_json
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                method=excluded.method,
+                url=excluded.url,
+                host=excluded.host,
+                path=excluded.path,
+                query_string=excluded.query_string,
+                query_params=excluded.query_params,
+                status=excluded.status,
+                status_text=excluded.status_text,
+                duration_ms=excluded.duration_ms,
+                timestamp=excluded.timestamp,
+                request_headers=excluded.request_headers,
+                response_headers=excluded.response_headers,
+                request_body=excluded.request_body,
+                response_body=excluded.response_body,
+                request_body_json=excluded.request_body_json,
+                response_body_json=excluded.response_body_json,
+                content_type=excluded.content_type,
+                has_auth=excluded.has_auth,
+                is_https=excluded.is_https,
+                body_truncated=excluded.body_truncated,
+                remote_ip=excluded.remote_ip,
+                source=excluded.source,
+                platform=excluded.platform,
+                reporter_host=excluded.reporter_host,
+                raw_entry_json=excluded.raw_entry_json
+            """,
+            (
+                record["id"],
+                record["method"],
+                record["url"],
+                record["host"],
+                record["path"],
+                record["query_string"],
+                _json_dumps(record["query_params"]),
+                record["status"],
+                record["status_text"],
+                record["duration_ms"],
+                record["timestamp"],
+                _json_dumps(record["request_headers"]),
+                _json_dumps(record["response_headers"]),
+                record["request_body"],
+                record["response_body"],
+                _json_dumps(record["request_body_json"]),
+                _json_dumps(record["response_body_json"]),
+                record["content_type"],
+                int(record["has_auth"]),
+                int(record["is_https"]),
+                int(record["body_truncated"]),
+                record["remote_ip"],
+                record["source"],
+                record["platform"],
+                record["reporter_host"],
+                _json_dumps(record.get("raw_entry")),
+            ),
+        )
+        return existing is not None
+
+    def _build_ws_session_record(
+        self,
+        event: dict[str, Any],
+        request_id: str,
+        source: str,
+        platform: str | None,
+        reporter_host: str | None,
+        existing_row: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        session = event.get("session")
+        session_data = session if isinstance(session, dict) else {}
+        request_obj = event.get("request")
+        if not isinstance(request_obj, dict):
+            request_obj = session_data.get("request")
+        if not isinstance(request_obj, dict):
+            request_obj = {}
+
+        response_obj = event.get("response")
+        if not isinstance(response_obj, dict):
+            response_obj = session_data.get("response")
+        if not isinstance(response_obj, dict):
+            response_obj = {}
+
+        existing_request_headers = (
+            _json_loads(existing_row["request_headers"], {})
+            if existing_row is not None
+            else {}
+        )
+        existing_response_headers = (
+            _json_loads(existing_row["response_headers"], {})
+            if existing_row is not None
+            else {}
+        )
+
+        method = str(
+            request_obj.get("method")
+            or event.get("method")
+            or session_data.get("method")
+            or (existing_row["method"] if existing_row is not None else "GET")
+            or "GET"
+        ).strip().upper() or "GET"
+
+        url = str(
+            request_obj.get("url")
+            or event.get("url")
+            or session_data.get("url")
+            or (existing_row["url"] if existing_row is not None else "")
+            or ""
+        ).strip()
+        if not url:
+            url = f"ws://unknown.local/{request_id}"
+
+        parsed = urlparse(url)
+        query_string, query_params = _query_params_from_url(url)
+
+        request_headers = _normalize_headers(
+            request_obj.get("headers")
+            or event.get("request_headers")
+            or session_data.get("request_headers")
+        )
+        if not request_headers:
+            request_headers = existing_request_headers
+
+        response_headers = _normalize_headers(
+            response_obj.get("headers")
+            or event.get("response_headers")
+            or session_data.get("response_headers")
+        )
+        if not response_headers:
+            response_headers = existing_response_headers
+
+        status = _safe_int(
+            response_obj.get("status")
+            if response_obj.get("status") is not None
+            else event.get("status")
+        )
+        if status is None and existing_row is not None:
+            status = _safe_int(existing_row["status"])
+
+        status_text = str(
+            response_obj.get("statusText")
+            or event.get("status_text")
+            or session_data.get("status_text")
+            or (existing_row["status_text"] if existing_row is not None else "")
+            or ""
+        ).strip() or None
+
+        duration_ms = _safe_int(event.get("duration_ms"))
+        if duration_ms is None and existing_row is not None:
+            duration_ms = _safe_int(existing_row["duration_ms"])
+
+        timestamp = str(
+            session_data.get("startedDateTime")
+            or event.get("session_started_at")
+            or event.get("timestamp")
+            or event.get("time")
+            or (existing_row["timestamp"] if existing_row is not None else "")
+            or ""
+        ).strip() or None
+
+        remote_ip = str(
+            event.get("remote_ip")
+            or session_data.get("remote_ip")
+            or (existing_row["remote_ip"] if existing_row is not None else "")
+            or ""
+        ).strip() or None
+
+        content_type = None
+        for key, values in request_headers.items():
+            if key.lower() == "content-type" and values:
+                content_type = values[0]
+                break
+        if not content_type and existing_row is not None:
+            content_type = existing_row["content_type"]
+
+        has_auth = any(key.lower() == "authorization" for key in request_headers.keys())
+        if not request_headers and existing_row is not None:
+            has_auth = bool(existing_row["has_auth"])
+
+        raw_entry = (
+            event.get("raw_session")
+            if isinstance(event.get("raw_session"), dict)
+            else session_data
+        )
+        if not raw_entry and existing_row is not None:
+            raw_entry = _json_loads(existing_row["raw_entry_json"], None)
+        if not raw_entry:
+            raw_entry = {"session_id": request_id}
+
+        if query_params:
+            normalized_query_params = query_params
+        elif existing_row is not None:
+            normalized_query_params = _json_loads(existing_row["query_params"], {})
+        else:
+            normalized_query_params = {}
+
+        host = parsed.hostname or None
+        if not host and existing_row is not None:
+            host = existing_row["host"]
+        path = parsed.path or "/"
+        if (not parsed.path) and existing_row is not None and existing_row["path"]:
+            path = existing_row["path"]
+        if query_string is None and existing_row is not None and existing_row["query_string"]:
+            query_string = existing_row["query_string"]
+
+        if existing_row is not None:
+            request_body = existing_row["request_body"]
+            response_body = existing_row["response_body"]
+            request_body_json = _json_loads(existing_row["request_body_json"], None)
+            response_body_json = _json_loads(existing_row["response_body_json"], None)
+            body_truncated = bool(existing_row["body_truncated"])
+            existing_platform = existing_row["platform"]
+            existing_reporter_host = existing_row["reporter_host"]
+        else:
+            request_body = None
+            response_body = None
+            request_body_json = None
+            response_body_json = None
+            body_truncated = False
+            existing_platform = None
+            existing_reporter_host = None
+
+        scheme = parsed.scheme.lower()
+        if scheme in {"https", "wss"}:
+            is_https = True
+        elif scheme in {"http", "ws"}:
+            is_https = False
+        elif existing_row is not None:
+            is_https = bool(existing_row["is_https"])
+        else:
+            is_https = False
+
+        return {
+            "id": request_id,
+            "method": method,
+            "url": url,
+            "host": host,
+            "path": path,
+            "query_string": query_string,
+            "query_params": normalized_query_params,
+            "status": status,
+            "status_text": status_text,
+            "duration_ms": duration_ms,
+            "timestamp": timestamp,
+            "request_headers": request_headers,
+            "response_headers": response_headers,
+            "request_body": request_body,
+            "response_body": response_body,
+            "request_body_json": request_body_json,
+            "response_body_json": response_body_json,
+            "content_type": content_type,
+            "has_auth": has_auth,
+            "is_https": is_https,
+            "body_truncated": body_truncated,
+            "remote_ip": remote_ip,
+            "source": source,
+            "platform": platform or existing_platform,
+            "reporter_host": reporter_host or existing_reporter_host,
+            "raw_entry": raw_entry,
+        }
+
+    def _extract_ws_event_frames(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
+        raw_frames = event.get("frames")
+        if isinstance(raw_frames, list):
+            frames.extend(item for item in raw_frames if isinstance(item, dict))
+        frame = event.get("frame")
+        if isinstance(frame, dict):
+            frames.append(frame)
+        message = event.get("message")
+        if isinstance(message, dict):
+            frames.append(message)
+
+        if frames:
+            return frames
+
+        event_kind = _event_type(event)
+        if event_kind not in {"message", "frame", "ping", "pong", "close"}:
+            return []
+
+        generated: dict[str, Any] = {}
+        for key in (
+            "direction",
+            "fromClient",
+            "outgoing",
+            "flow",
+            "opcode",
+            "messageType",
+            "type",
+            "encoding",
+            "binary",
+        ):
+            if key in event:
+                generated[key] = event[key]
+
+        if "timestamp" in event:
+            generated["timestamp"] = event["timestamp"]
+        elif "time" in event:
+            generated["time"] = event["time"]
+
+        if "data" in event:
+            generated["data"] = event["data"]
+        elif "payload_text" in event:
+            generated["data"] = event["payload_text"]
+        elif "payload" in event:
+            generated["payload"] = event["payload"]
+
+        close_code = _safe_int(event.get("close_code"))
+        close_reason_raw = event.get("close_reason")
+        close_reason = str(close_reason_raw).strip() if close_reason_raw is not None else ""
+        if event_kind == "close":
+            generated.setdefault("opcode", 8)
+            payload = generated.get("payload")
+            payload_data = payload if isinstance(payload, dict) else {}
+            payload_data.setdefault("type", 6)
+            if close_code is not None:
+                payload_data["code"] = close_code
+            if close_reason:
+                payload_data["reason"] = close_reason
+            if payload_data:
+                generated["payload"] = payload_data
+
+        if not generated:
+            return []
+        return [generated]
+
+    def _next_ws_seq(self, conn: sqlite3.Connection, request_id: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS seq FROM websocket_messages WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        return int(row["seq"] or 0) + 1 if row is not None else 1
+
+    def _append_websocket_message(
+        self,
+        conn: sqlite3.Connection,
+        request_id: str,
+        message: dict[str, Any],
+    ) -> str:
+        existing = conn.execute(
+            """
+            SELECT direction, timestamp, opcode, message_type, data, data_json,
+                   is_binary, encoding, body_truncated, raw_message_json
+            FROM websocket_messages
+            WHERE request_id = ? AND seq = ?
+            """,
+            (request_id, message["seq"]),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO websocket_messages(
+                    request_id, seq, direction, timestamp, opcode, message_type,
+                    data, data_json, is_binary, encoding, body_truncated, raw_message_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    message["seq"],
+                    message["direction"],
+                    message["timestamp"],
+                    message["opcode"],
+                    message["message_type"],
+                    message["data"],
+                    _json_dumps(message["data_json"]),
+                    int(message["is_binary"]),
+                    message["encoding"],
+                    int(message["body_truncated"]),
+                    _json_dumps(message.get("raw")),
+                ),
+            )
+            return "inserted"
+
+        merged_direction = existing["direction"]
+        if merged_direction == "unknown" and message["direction"] != "unknown":
+            merged_direction = message["direction"]
+
+        merged_timestamp = existing["timestamp"] or message["timestamp"]
+        merged_opcode = existing["opcode"] if existing["opcode"] is not None else message["opcode"]
+        merged_message_type = existing["message_type"] or message["message_type"]
+        merged_data = existing["data"] if existing["data"] is not None else message["data"]
+        incoming_data_json = _json_dumps(message["data_json"])
+        existing_data_json_present = existing["data_json"] not in (None, "", "null")
+        merged_data_json = (
+            existing["data_json"] if existing_data_json_present else incoming_data_json
+        )
+        merged_is_binary = int(bool(existing["is_binary"]) or bool(message["is_binary"]))
+        merged_encoding = existing["encoding"] or message["encoding"]
+        merged_body_truncated = int(bool(existing["body_truncated"]) or bool(message["body_truncated"]))
+        incoming_raw = _json_dumps(message.get("raw"))
+        existing_raw_present = existing["raw_message_json"] not in (None, "", "null")
+        merged_raw = existing["raw_message_json"] if existing_raw_present else incoming_raw
+
+        changed = any(
+            [
+                merged_direction != existing["direction"],
+                merged_timestamp != existing["timestamp"],
+                merged_opcode != existing["opcode"],
+                merged_message_type != existing["message_type"],
+                merged_data != existing["data"],
+                merged_data_json != existing["data_json"],
+                merged_is_binary != int(existing["is_binary"]),
+                merged_encoding != existing["encoding"],
+                merged_body_truncated != int(existing["body_truncated"]),
+                merged_raw != existing["raw_message_json"],
+            ]
+        )
+
+        if not changed:
+            return "duplicate"
+
+        conn.execute(
+            """
+            UPDATE websocket_messages
+            SET direction = ?, timestamp = ?, opcode = ?, message_type = ?,
+                data = ?, data_json = ?, is_binary = ?, encoding = ?,
+                body_truncated = ?, raw_message_json = ?
+            WHERE request_id = ? AND seq = ?
+            """,
+            (
+                merged_direction,
+                merged_timestamp,
+                merged_opcode,
+                merged_message_type,
+                merged_data,
+                merged_data_json,
+                merged_is_binary,
+                merged_encoding,
+                merged_body_truncated,
+                merged_raw,
+                request_id,
+                message["seq"],
+            ),
+        )
+        return "updated"
+
     def ingest_payload(
         self,
         payload: Any,
@@ -295,81 +816,7 @@ class RequestStorage:
                     platform=platform,
                     reporter_host=reporter_host,
                 )
-
-                existing = conn.execute(
-                    "SELECT 1 FROM requests WHERE id = ?",
-                    (record["id"],),
-                ).fetchone()
-                conn.execute(
-                    """
-                    INSERT INTO requests(
-                        id, method, url, host, path, query_string, query_params,
-                        status, status_text, duration_ms, timestamp,
-                        request_headers, response_headers,
-                        request_body, response_body,
-                        request_body_json, response_body_json,
-                        content_type, has_auth, is_https, body_truncated,
-                        remote_ip, source, platform, reporter_host, raw_entry_json
-                    )
-                    VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )
-                    ON CONFLICT(id) DO UPDATE SET
-                        method=excluded.method,
-                        url=excluded.url,
-                        host=excluded.host,
-                        path=excluded.path,
-                        query_string=excluded.query_string,
-                        query_params=excluded.query_params,
-                        status=excluded.status,
-                        status_text=excluded.status_text,
-                        duration_ms=excluded.duration_ms,
-                        timestamp=excluded.timestamp,
-                        request_headers=excluded.request_headers,
-                        response_headers=excluded.response_headers,
-                        request_body=excluded.request_body,
-                        response_body=excluded.response_body,
-                        request_body_json=excluded.request_body_json,
-                        response_body_json=excluded.response_body_json,
-                        content_type=excluded.content_type,
-                        has_auth=excluded.has_auth,
-                        is_https=excluded.is_https,
-                        body_truncated=excluded.body_truncated,
-                        remote_ip=excluded.remote_ip,
-                        source=excluded.source,
-                        platform=excluded.platform,
-                        reporter_host=excluded.reporter_host,
-                        raw_entry_json=excluded.raw_entry_json
-                    """,
-                    (
-                        record["id"],
-                        record["method"],
-                        record["url"],
-                        record["host"],
-                        record["path"],
-                        record["query_string"],
-                        _json_dumps(record["query_params"]),
-                        record["status"],
-                        record["status_text"],
-                        record["duration_ms"],
-                        record["timestamp"],
-                        _json_dumps(record["request_headers"]),
-                        _json_dumps(record["response_headers"]),
-                        record["request_body"],
-                        record["response_body"],
-                        _json_dumps(record["request_body_json"]),
-                        _json_dumps(record["response_body_json"]),
-                        record["content_type"],
-                        int(record["has_auth"]),
-                        int(record["is_https"]),
-                        int(record["body_truncated"]),
-                        record["remote_ip"],
-                        record["source"],
-                        record["platform"],
-                        record["reporter_host"],
-                        _json_dumps(record.get("raw_entry")),
-                    ),
-                )
+                existing = self._upsert_request_record(conn, record)
                 self._replace_websocket_messages(conn, record["id"], record["websocket_messages"])
                 if record["is_websocket"]:
                     websocket_sessions += 1
@@ -400,6 +847,129 @@ class RequestStorage:
             "updated": updated,
             "websocket_sessions": websocket_sessions,
             "websocket_messages": websocket_messages,
+        }
+
+    def ingest_websocket_events(
+        self,
+        payload: Any,
+        source: str,
+        platform: str | None = None,
+        reporter_host: str | None = None,
+    ) -> dict[str, int]:
+        events = _extract_ws_events(payload)
+        if not events:
+            self.add_event("warning", "No valid WebSocket events found in payload")
+            return {
+                "received_events": 0,
+                "accepted_events": 0,
+                "rejected_events": 0,
+                "inserted_sessions": 0,
+                "updated_sessions": 0,
+                "inserted_messages": 0,
+                "updated_messages": 0,
+                "duplicate_messages": 0,
+            }
+
+        accepted_events = 0
+        rejected_events = 0
+        inserted_sessions = 0
+        updated_sessions = 0
+        inserted_messages = 0
+        updated_messages = 0
+        duplicate_messages = 0
+
+        with self._connect() as conn:
+            for event in events:
+                session_obj = event.get("session")
+                session_id_fallback = session_obj.get("id") if isinstance(session_obj, dict) else None
+                request_id = _event_id(
+                    event.get("session_id")
+                    or event.get("request_id")
+                    or event.get("id")
+                    or session_id_fallback
+                )
+                if not request_id:
+                    rejected_events += 1
+                    continue
+
+                existing_row = conn.execute(
+                    "SELECT * FROM requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                record = self._build_ws_session_record(
+                    event=event,
+                    request_id=request_id,
+                    source=source,
+                    platform=platform,
+                    reporter_host=reporter_host,
+                    existing_row=existing_row,
+                )
+                was_existing = self._upsert_request_record(conn, record)
+                if was_existing:
+                    updated_sessions += 1
+                else:
+                    inserted_sessions += 1
+
+                raw_frames = self._extract_ws_event_frames(event)
+                event_seq = _safe_int(event.get("seq"))
+                if not raw_frames and _event_type(event) in {"open", "connected"}:
+                    accepted_events += 1
+                    continue
+
+                if not raw_frames:
+                    accepted_events += 1
+                    continue
+
+                next_seq = self._next_ws_seq(conn, request_id)
+                for index, raw_frame in enumerate(raw_frames):
+                    seq = _safe_int(raw_frame.get("seq"))
+                    if seq is None and event_seq is not None:
+                        seq = event_seq + index
+                    if seq is None or seq <= 0:
+                        seq = next_seq
+                        next_seq += 1
+                    normalized = normalize_websocket_message(
+                        raw_frame,
+                        max_body_size=self.max_body_size,
+                        seq=seq,
+                    )
+                    action = self._append_websocket_message(
+                        conn=conn,
+                        request_id=request_id,
+                        message=normalized,
+                    )
+                    if action == "inserted":
+                        inserted_messages += 1
+                    elif action == "updated":
+                        updated_messages += 1
+                    else:
+                        duplicate_messages += 1
+                accepted_events += 1
+            conn.commit()
+
+        self.add_event(
+            "info",
+            "WebSocket events ingested",
+            {
+                "received_events": len(events),
+                "accepted_events": accepted_events,
+                "rejected_events": rejected_events,
+                "inserted_sessions": inserted_sessions,
+                "updated_sessions": updated_sessions,
+                "inserted_messages": inserted_messages,
+                "updated_messages": updated_messages,
+                "duplicate_messages": duplicate_messages,
+            },
+        )
+        return {
+            "received_events": len(events),
+            "accepted_events": accepted_events,
+            "rejected_events": rejected_events,
+            "inserted_sessions": inserted_sessions,
+            "updated_sessions": updated_sessions,
+            "inserted_messages": inserted_messages,
+            "updated_messages": updated_messages,
+            "duplicate_messages": duplicate_messages,
         }
 
     def import_har_file(
@@ -937,6 +1507,178 @@ class RequestStorage:
             if len(matches) >= normalized_limit:
                 break
         return matches
+
+    def tail_websocket_messages(
+        self,
+        request_id: str,
+        after_seq: int | None = None,
+        direction: str | None = None,
+        message_type: str | None = None,
+        limit: int = 20,
+        include_raw: bool = False,
+    ) -> dict[str, Any]:
+        normalized_request_id = request_id.strip()
+        if not normalized_request_id:
+            return {
+                "request_id": request_id,
+                "after_seq": after_seq,
+                "returned": 0,
+                "next_after_seq": after_seq,
+                "messages": [],
+            }
+
+        normalized_limit = max(1, min(limit, 500))
+        normalized_after_seq = _safe_int(after_seq)
+        normalized_direction = direction if direction in VALID_WS_DIRECTIONS else None
+        normalized_message_type = (message_type or "").strip().lower() or None
+        query_limit = normalized_limit
+        if normalized_direction or normalized_message_type:
+            query_limit = min(max(normalized_limit * 20, 200), 5000)
+
+        where_parts = ["request_id = ?"]
+        params: list[Any] = [normalized_request_id]
+        if normalized_after_seq is not None:
+            where_parts.append("seq > ?")
+            params.append(normalized_after_seq)
+            order_clause = "ORDER BY seq ASC"
+        else:
+            order_clause = "ORDER BY seq DESC"
+
+        where_clause = " AND ".join(where_parts)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT request_id, seq, direction, timestamp, opcode, message_type,
+                       data, data_json, is_binary, encoding, body_truncated, raw_message_json
+                FROM websocket_messages
+                WHERE {where_clause}
+                {order_clause}
+                LIMIT ?
+                """,
+                (*params, query_limit),
+            ).fetchall()
+
+        if normalized_after_seq is None:
+            ordered_rows = list(reversed(rows))
+        else:
+            ordered_rows = list(rows)
+
+        messages: list[dict[str, Any]] = []
+        for row in ordered_rows:
+            message = self._row_to_websocket_message(row)
+            if normalized_direction and message.direction != normalized_direction:
+                continue
+            if normalized_message_type and (message.message_type or "").lower() != normalized_message_type:
+                continue
+            item = {
+                "request_id": normalized_request_id,
+                "seq": message.seq,
+                "direction": message.direction,
+                "timestamp": message.timestamp,
+                "opcode": message.opcode,
+                "message_type": message.message_type,
+                "data": message.data,
+                "data_json": message.data_json,
+                "has_json": message.data_json is not None,
+                "is_binary": message.is_binary,
+                "encoding": message.encoding,
+                "body_truncated": message.body_truncated,
+                "close_code": message.close_code,
+                "close_reason": message.close_reason,
+            }
+            if include_raw:
+                item["raw"] = message.raw
+            messages.append(item)
+            if len(messages) >= normalized_limit:
+                break
+
+        next_after_seq = messages[-1]["seq"] if messages else normalized_after_seq
+        return {
+            "request_id": normalized_request_id,
+            "after_seq": normalized_after_seq,
+            "returned": len(messages),
+            "next_after_seq": next_after_seq,
+            "messages": messages,
+        }
+
+    def list_active_websocket_sessions(
+        self,
+        limit: int = 20,
+        domain: str | None = None,
+        active_within_seconds: int = 300,
+        include_closing: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(limit, 200))
+        normalized_window = max(1, min(active_within_seconds, 86400))
+        normalized_domain = (domain or "").strip().lower() or None
+
+        where_parts = ["datetime(agg.last_seen_at) >= datetime('now', ?)"]
+        params: list[Any] = [f"-{normalized_window} seconds"]
+        if normalized_domain:
+            where_parts.append("LOWER(COALESCE(r.host, '')) = ?")
+            params.append(normalized_domain)
+        if not include_closing:
+            where_parts.append("agg.has_close_frame = 0")
+
+        where_clause = " AND ".join(where_parts)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH agg AS (
+                    SELECT
+                        request_id,
+                        MAX(created_at) AS last_seen_at,
+                        MAX(seq) AS last_seq,
+                        COUNT(*) AS message_count,
+                        MAX(
+                            CASE
+                                WHEN opcode = 8 OR LOWER(COALESCE(message_type, '')) = 'close'
+                                THEN 1 ELSE 0
+                            END
+                        ) AS has_close_frame
+                    FROM websocket_messages
+                    GROUP BY request_id
+                )
+                SELECT
+                    r.id, r.method, r.url, r.host, r.path, r.status, r.duration_ms, r.timestamp,
+                    agg.last_seen_at, agg.last_seq, agg.message_count, agg.has_close_frame,
+                    wm.direction AS last_direction,
+                    wm.message_type AS last_message_type,
+                    wm.opcode AS last_opcode
+                FROM agg
+                JOIN requests r ON r.id = agg.request_id
+                LEFT JOIN websocket_messages wm
+                    ON wm.request_id = agg.request_id AND wm.seq = agg.last_seq
+                WHERE {where_clause}
+                ORDER BY agg.last_seen_at DESC, r.id DESC
+                LIMIT ?
+                """,
+                (*params, normalized_limit),
+            ).fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "id": row["id"],
+                    "method": row["method"],
+                    "url": row["url"],
+                    "host": row["host"],
+                    "path": row["path"],
+                    "status": row["status"],
+                    "duration_ms": row["duration_ms"],
+                    "timestamp": row["timestamp"],
+                    "is_websocket": True,
+                    "websocket_message_count": int(row["message_count"] or 0),
+                    "last_message_at": row["last_seen_at"],
+                    "last_message_seq": int(row["last_seq"] or 0),
+                    "last_message_direction": row["last_direction"],
+                    "last_message_type": row["last_message_type"],
+                    "last_message_opcode": row["last_opcode"],
+                    "has_close_frame": bool(row["has_close_frame"]),
+                }
+            )
+        return result
 
     def get_domains(self, limit: int = 500) -> list[dict[str, Any]]:
         normalized_limit = max(1, min(limit, 2000))

@@ -214,6 +214,25 @@ def list_websocket_sessions(limit: int = 20, detail: str = "summary", domain: st
 
 
 @mcp.tool()
+def list_active_websocket_sessions(
+    limit: int = 20,
+    domain: str | None = None,
+    active_within_seconds: int = 300,
+    include_closing: bool = False,
+) -> str:
+    """List recently active WebSocket sessions inferred from latest captured frames."""
+    normalized_limit = _bounded_limit(limit, default=20, maximum=200)
+    normalized_window = _bounded_limit(active_within_seconds, default=300, maximum=86400)
+    sessions = storage.list_active_websocket_sessions(
+        limit=normalized_limit,
+        domain=domain,
+        active_within_seconds=normalized_window,
+        include_closing=include_closing,
+    )
+    return _json_response(sessions)
+
+
+@mcp.tool()
 def get_request(request_id: str, include_body: bool = True) -> str:
     """Get detailed information for a single request."""
     if not request_id.strip():
@@ -245,6 +264,34 @@ def get_websocket_session(request_id: str, include_messages: bool = True) -> str
         })
     if not include_messages and "websocket_messages" in result:
         result.pop("websocket_messages", None)
+    return _json_response(result)
+
+
+@mcp.tool()
+def tail_websocket_messages(
+    request_id: str,
+    after_seq: int | None = None,
+    direction: str | None = None,
+    message_type: str | None = None,
+    include_raw: bool = False,
+    limit: int = 20,
+) -> str:
+    """Tail WebSocket messages for one session using seq cursor."""
+    if not request_id.strip():
+        return _json_response({"error": "request_id is required"})
+    normalized_direction = direction if direction in VALID_WS_DIRECTIONS else None
+    normalized_message_type = (message_type or "").strip().lower() or None
+    if normalized_message_type not in VALID_WS_MESSAGE_TYPES:
+        normalized_message_type = None
+    normalized_limit = _bounded_limit(limit, default=20, maximum=200)
+    result = storage.tail_websocket_messages(
+        request_id=request_id,
+        after_seq=after_seq,
+        direction=normalized_direction,
+        message_type=normalized_message_type,
+        include_raw=include_raw,
+        limit=normalized_limit,
+    )
     return _json_response(result)
 
 
@@ -648,6 +695,11 @@ def websocket_sessions_resource() -> str:
     return _json_response([item.model_dump() for item in requests])
 
 
+@mcp.resource("reqable://websocket/active")
+def websocket_active_resource() -> str:
+    return list_active_websocket_sessions(limit=30, active_within_seconds=300, include_closing=False)
+
+
 @mcp.resource("reqable://domains")
 def domains_resource() -> str:
     return get_domains()
@@ -664,9 +716,9 @@ def startup_check_prompt() -> str:
 1) Call ingest_status and confirm listening=true
 2) Start capture in Reqable
 3) Use list_requests/search_requests/get_request for HTTP analysis
-4) Use list_websocket_sessions/get_websocket_session/search_websocket_messages/analyze_websocket_session/export_websocket_session_raw for WebSocket data
+4) Use list_websocket_sessions/list_active_websocket_sessions/get_websocket_session/tail_websocket_messages/search_websocket_messages/analyze_websocket_session/export_websocket_session_raw for WebSocket data
 5) Use health_report/repair_websocket_messages if data quality looks off
-6) Reqable Report Server official docs currently describe completed HTTP session upload; if live WebSocket frames are missing, export/import HAR as fallback
+6) Optional incremental WS event ingest endpoint is /ws/events on the same host/port; if live frames are still missing, export/import HAR as fallback
 """
 
 

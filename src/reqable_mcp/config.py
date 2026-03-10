@@ -13,6 +13,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_INGEST_HOST = "127.0.0.1"
 DEFAULT_INGEST_PORT = 18765
 DEFAULT_INGEST_PATH = "/report"
+DEFAULT_WS_EVENTS_PATH = "/ws/events"
 DEFAULT_MAX_BODY_SIZE = 1024 * 100  # 100KB
 DEFAULT_MAX_REPORT_SIZE = 10 * 1024 * 1024  # 10MB
 DEFAULT_MAX_IMPORT_FILE_SIZE = 100 * 1024 * 1024  # 100MB
@@ -83,6 +84,15 @@ def get_ingest_path() -> str:
     return value
 
 
+def get_ws_events_path() -> str:
+    value = os.environ.get("REQABLE_WS_EVENTS_PATH", DEFAULT_WS_EVENTS_PATH).strip()
+    if not value:
+        return DEFAULT_WS_EVENTS_PATH
+    if not value.startswith("/"):
+        return f"/{value}"
+    return value
+
+
 def get_ingest_token() -> str | None:
     value = os.environ.get("REQABLE_INGEST_TOKEN", "").strip()
     return value or None
@@ -131,6 +141,7 @@ class Config:
     max_report_size: int
     retention_days: int
     max_import_file_size: int = DEFAULT_MAX_IMPORT_FILE_SIZE
+    ws_events_path: str = DEFAULT_WS_EVENTS_PATH
     default_list_limit: int = 20
     key_body_preview_length: int = 500
     summary_body_preview_length: int = 200
@@ -138,6 +149,10 @@ class Config:
     @property
     def ingest_url(self) -> str:
         return f"http://{self.ingest_host}:{self.ingest_port}{self.ingest_path}"
+
+    @property
+    def ws_events_url(self) -> str:
+        return f"http://{self.ingest_host}:{self.ingest_port}{self.ws_events_path}"
 
 
 def load_config() -> Config:
@@ -150,6 +165,7 @@ def load_config() -> Config:
         ingest_port=get_ingest_port(),
         ingest_path=get_ingest_path(),
         ingest_token=get_ingest_token(),
+        ws_events_path=get_ws_events_path(),
         max_body_size=get_max_body_size(),
         max_report_size=get_max_report_size(),
         max_import_file_size=get_max_import_file_size(),

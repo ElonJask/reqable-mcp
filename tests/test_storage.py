@@ -367,6 +367,120 @@ def test_search_websocket_messages_filter_only_scans_deep_enough(tmp_path: Path)
     assert matches[0]["close_code"] == 1001
 
 
+def test_ingest_websocket_events_tail_and_active_sessions(tmp_path: Path) -> None:
+    storage = RequestStorage(
+        db_path=tmp_path / "requests.db",
+        max_body_size=102400,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=7,
+    )
+
+    payload = {
+        "events": [
+            {
+                "session_id": "ws-live-1",
+                "event_type": "open",
+                "request": {
+                    "method": "GET",
+                    "url": "wss://ws.example.com/live?channel=one",
+                    "headers": [
+                        {"name": "Connection", "value": "Upgrade"},
+                        {"name": "Upgrade", "value": "websocket"},
+                    ],
+                },
+                "response": {
+                    "status": 101,
+                    "statusText": "Switching Protocols",
+                },
+                "timestamp": "2026-03-10T10:00:00.000Z",
+            },
+            {
+                "session_id": "ws-live-1",
+                "event_type": "frame",
+                "seq": 1,
+                "frame": {
+                    "type": "send",
+                    "time": "2026-03-10T10:00:00.100Z",
+                    "opcode": 1,
+                    "data": '{"event":"subscribe","channel":"one"}',
+                },
+            },
+            {
+                "session_id": "ws-live-1",
+                "event_type": "frame",
+                "seq": 2,
+                "frame": {
+                    "type": "receive",
+                    "time": "2026-03-10T10:00:00.200Z",
+                    "opcode": 1,
+                    "data": '{"event":"ack","channel":"one"}',
+                },
+            },
+            {
+                "session_id": "ws-live-1",
+                "event_type": "close",
+                "seq": 3,
+                "close_code": 1000,
+                "close_reason": "normal",
+                "timestamp": "2026-03-10T10:00:00.300Z",
+            },
+            {
+                "session_id": "ws-live-2",
+                "event_type": "open",
+                "request": {
+                    "method": "GET",
+                    "url": "wss://ws.example.com/live?channel=two",
+                },
+                "response": {"status": 101},
+            },
+            {
+                "session_id": "ws-live-2",
+                "event_type": "message",
+                "direction": "inbound",
+                "opcode": 1,
+                "payload_text": '{"event":"push","channel":"two"}',
+            },
+        ]
+    }
+
+    result = storage.ingest_websocket_events(payload=payload, source="report_server_ws_events")
+    assert result["received_events"] == 6
+    assert result["accepted_events"] == 6
+    assert result["inserted_sessions"] == 2
+    assert result["inserted_messages"] == 4
+
+    tail = storage.tail_websocket_messages(request_id="ws-live-1", after_seq=1, limit=10)
+    assert tail["returned"] == 2
+    assert [item["seq"] for item in tail["messages"]] == [2, 3]
+    assert tail["messages"][1]["message_type"] == "close"
+    assert tail["messages"][1]["close_code"] == 1000
+
+    summary = storage.get_request_by_id("ws-live-2", detail_level=DetailLevel.SUMMARY)
+    assert summary is not None
+    assert summary.is_websocket is True
+
+    active_default = storage.list_active_websocket_sessions(
+        limit=10,
+        domain="ws.example.com",
+        active_within_seconds=3600,
+        include_closing=False,
+    )
+    assert len(active_default) == 1
+    assert active_default[0]["id"] == "ws-live-2"
+    assert active_default[0]["has_close_frame"] is False
+
+    active_with_close = storage.list_active_websocket_sessions(
+        limit=10,
+        domain="ws.example.com",
+        active_within_seconds=3600,
+        include_closing=True,
+    )
+    ids = {item["id"] for item in active_with_close}
+    assert "ws-live-1" in ids
+    assert "ws-live-2" in ids
+
+
 def test_websocket_health_report_and_repair(tmp_path: Path) -> None:
     storage = RequestStorage(
         db_path=tmp_path / "requests.db",

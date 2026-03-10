@@ -6,6 +6,33 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-10
+
+### Added
+
+- Incremental WebSocket ingest path over HTTP:
+  - New receiver path `/ws/events` (configurable via `REQABLE_WS_EVENTS_PATH`).
+  - New storage ingest pipeline `ingest_websocket_events` for event-style frame uploads.
+- WebSocket incremental query tools:
+  - `tail_websocket_messages` for cursor-based (`after_seq`) session tailing.
+  - `list_active_websocket_sessions` for recent-session activity view.
+- New MCP resource: `reqable://websocket/active`.
+- Ingest status now exposes incremental capability fields:
+  - `supports_incremental_websocket_events`
+  - `ws_events_url`
+  - `ws_events_path`
+
+### Changed
+
+- Storage model extended from snapshot-only replacement to support incremental append/merge semantics for WebSocket frames:
+  - Session-level upsert for live event streams.
+  - Message-level append with duplicate/update detection.
+- README (EN/CN) updated with `/ws/events`, new tools, and configuration.
+- Test coverage expanded for:
+  - `/ws/events` ingest roundtrip
+  - Event ingest + tail + active-session flows
+  - New MCP tool behavior and status fields
+
 ## [0.2.0] - 2026-03-10
 
 ### Added

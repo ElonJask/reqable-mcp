@@ -93,7 +93,8 @@ class IngestServerManager:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
-                if parsed.path != manager.config.ingest_path:
+                route = parsed.path
+                if route not in {manager.config.ingest_path, manager.config.ws_events_path}:
                     self._send_json(404, {"ok": False, "error": "not_found"})
                     return
 
@@ -163,19 +164,30 @@ class IngestServerManager:
                     return
 
                 try:
-                    result = manager.storage.ingest_payload(
-                        payload=payload,
-                        source="report_server",
-                        platform=self.headers.get("x-reqable-platform"),
-                        reporter_host=self.headers.get("x-reporter-host"),
-                    )
+                    if route == manager.config.ws_events_path:
+                        result = manager.storage.ingest_websocket_events(
+                            payload=payload,
+                            source="report_server_ws_events",
+                            platform=self.headers.get("x-reqable-platform"),
+                            reporter_host=self.headers.get("x-reporter-host"),
+                        )
+                    else:
+                        result = manager.storage.ingest_payload(
+                            payload=payload,
+                            source="report_server",
+                            platform=self.headers.get("x-reqable-platform"),
+                            reporter_host=self.headers.get("x-reporter-host"),
+                        )
                 except Exception as exc:  # broad for robustness
                     manager._failed_payloads += 1
                     manager._last_error = str(exc)
                     manager.storage.add_event(
                         "error",
                         "Ingest payload failed",
-                        {"error": str(exc)},
+                        {
+                            "error": str(exc),
+                            "route": route,
+                        },
                     )
                     self._send_json(
                         500,
@@ -185,7 +197,18 @@ class IngestServerManager:
 
                 manager._accepted_payloads += 1
                 manager._last_error = None
-                self._send_json(200, {"ok": True, **result})
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "ingest_mode": (
+                            "ws_events"
+                            if route == manager.config.ws_events_path
+                            else "report"
+                        ),
+                        **result,
+                    },
+                )
 
         return Handler
 
@@ -236,10 +259,13 @@ class IngestServerManager:
             "ingest_transport": "http",
             "supports_raw_websocket_listener": False,
             "supports_websocket_capture": True,
+            "supports_incremental_websocket_events": True,
             "ingest_url": self.config.ingest_url,
+            "ws_events_url": self.config.ws_events_url,
             "host": self.config.ingest_host,
             "port": self.config.ingest_port,
             "path": self.config.ingest_path,
+            "ws_events_path": self.config.ws_events_path,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "accepted_payloads": self._accepted_payloads,
             "failed_payloads": self._failed_payloads,

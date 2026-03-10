@@ -116,9 +116,73 @@ def test_ingest_server_reports_http_listener_and_websocket_capture(tmp_path: Pat
     assert status["ingest_transport"] == "http"
     assert status["supports_raw_websocket_listener"] is False
     assert status["supports_websocket_capture"] is True
+    assert status["supports_incremental_websocket_events"] is True
+    assert status["ws_events_path"] == "/ws/events"
     assert status["total_requests"] == 1
     assert status["total_websocket_sessions"] == 1
     assert status["total_websocket_messages"] == 2
+
+
+def test_ingest_server_websocket_events_endpoint_roundtrip(tmp_path: Path) -> None:
+    port = _free_port()
+    cfg = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "requests.db",
+        ingest_host="127.0.0.1",
+        ingest_port=port,
+        ingest_path="/report",
+        ingest_token=None,
+        max_body_size=102400,
+        max_report_size=10 * 1024 * 1024,
+        retention_days=7,
+    )
+    storage = RequestStorage(
+        db_path=cfg.db_path,
+        max_body_size=cfg.max_body_size,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=cfg.retention_days,
+    )
+    manager = IngestServerManager(config=cfg, storage=storage)
+    manager.start()
+    try:
+        payload = {
+            "events": [
+                {
+                    "session_id": "ws-live-1",
+                    "event_type": "open",
+                    "request": {
+                        "method": "GET",
+                        "url": "wss://ws.example.com/live",
+                    },
+                    "response": {"status": 101},
+                },
+                {
+                    "session_id": "ws-live-1",
+                    "event_type": "message",
+                    "seq": 1,
+                    "direction": "inbound",
+                    "opcode": 1,
+                    "payload_text": '{"event":"hello"}',
+                },
+            ]
+        }
+        raw = json.dumps(payload).encode("utf-8")
+        req = Request(
+            url=f"http://127.0.0.1:{port}/ws/events",
+            data=raw,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["ok"] is True
+        assert body["ingest_mode"] == "ws_events"
+        assert body["accepted_events"] == 2
+        assert storage.total_websocket_sessions() == 1
+        assert storage.total_websocket_messages() == 1
+    finally:
+        manager.stop()
 
 
 def test_ingest_server_rejects_large_decoded_payload(tmp_path: Path) -> None:

@@ -7,8 +7,9 @@
 默认采用本地优先架构：
 
 1. Reqable 把 HAR(JSON) 上报到 `http://127.0.0.1:18765/report`。
-2. `reqable-mcp` 解析后写入本地 SQLite。
-3. MCP 工具只读取本地数据，不走默认云端中转。
+2. 可选地把增量 WebSocket 事件上报到 `http://127.0.0.1:18765/ws/events`。
+3. `reqable-mcp` 解析后写入本地 SQLite。
+4. MCP 工具只读取本地数据，不走默认云端中转。
 
 文档： [English](README.md) | [中文](README_CN.md)
 
@@ -65,7 +66,7 @@ uv run reqable-mcp
 
 保存后产生一点请求流量，再调用 `ingest_status` 验证计数是否增长。
 
-重要说明：Reqable 本体支持 WebSocket 调试，但当前官方 Report Server 文档描述的是“已完成的 HTTP 会话”HAR 上报。`reqable-mcp` 的接收端目前只监听 HTTP，不提供原生 WebSocket 监听端点；WebSocket 数据的支持方式是解析 HAR / 上报 payload 中携带的帧扩展字段（例如 `_webSocketMessages`）。当前实现会保留原始 entry JSON 与原始消息 JSON，并通过 `get_request`、`get_websocket_session`、`search_websocket_messages` 透传；如果实时上报里没有帧数据，建议从 Reqable 导出 HAR 后再用 `import_har` 补录。
+重要说明：`reqable-mcp` 仍然是 HTTP 接收模式（不提供原生 `ws://` 监听端点），但新增了两条 HTTP 接收路径：`/report`（HAR/会话快照）和 `/ws/events`（增量 WebSocket 事件）。只要上报 payload 里包含帧数据（例如 `_webSocketMessages` 或事件 `frame`），就会保留并透传原始 entry JSON 与原始消息 JSON；如果实时上报缺帧，建议从 Reqable 导出 HAR 后用 `import_har` 补录。
 
 ## 可用工具
 
@@ -75,7 +76,9 @@ uv run reqable-mcp
 - `get_request`：按 ID 查询请求明细（完整模式会返回 `raw_entry`）
 - `search_requests`：按关键字检索 HTTP URL / Body / 原始上报条目（`raw` / `raw_entry`）
 - `list_websocket_sessions`：列出 WebSocket 会话
+- `list_active_websocket_sessions`：按最近帧活动列出活跃 WebSocket 会话
 - `get_websocket_session`：按 ID 查询 WebSocket 会话及消息（含 `raw_entry` 与每条消息 `raw`）
+- `tail_websocket_messages`：按 `request_id + after_seq` 游标增量拉取消息
 - `search_websocket_messages`：按关键字、方向、类型、opcode、close code、域名、请求 ID 等精确检索 WebSocket 消息
 - `analyze_websocket_session`：汇总会话方向、消息类型、JSON 结构、close 事件
 - `export_websocket_session_raw`：导出 WebSocket 会话原始 entry 与原始帧列表
@@ -92,6 +95,7 @@ uv run reqable-mcp
 | `REQABLE_INGEST_HOST` | 接收服务监听地址 | `127.0.0.1` |
 | `REQABLE_INGEST_PORT` | 接收服务监听端口 | `18765` |
 | `REQABLE_INGEST_PATH` | 接收服务路径 | `/report` |
+| `REQABLE_WS_EVENTS_PATH` | 增量 WebSocket 事件接收路径 | `/ws/events` |
 | `REQABLE_DATA_DIR` | 本地数据目录 | 平台默认应用数据目录 |
 | `REQABLE_DB_PATH` | SQLite 文件路径 | `${REQABLE_DATA_DIR}/requests.db` |
 | `REQABLE_MAX_BODY_SIZE` | 每条请求/消息落库 body 最大字节数 | `102400` |

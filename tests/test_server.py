@@ -94,6 +94,22 @@ def test_websocket_tools_and_status(tmp_path: Path, monkeypatch) -> None:
             limit=5,
         )
     )
+    tail = json.loads(
+        server_module.tail_websocket_messages(
+            request_id=request_id,
+            after_seq=1,
+            direction="inbound",
+            limit=5,
+        )
+    )
+    active = json.loads(
+        server_module.list_active_websocket_sessions(
+            limit=5,
+            domain="ws.example.com",
+            active_within_seconds=3600,
+            include_closing=True,
+        )
+    )
     analysis = json.loads(server_module.analyze_websocket_session(request_id=request_id, sample_limit=2))
     exported = json.loads(
         server_module.export_websocket_session_raw(request_id=request_id, include_normalized=True)
@@ -125,6 +141,15 @@ def test_websocket_tools_and_status(tmp_path: Path, monkeypatch) -> None:
     assert close_search[0]["opcode"] == 8
     assert close_search[0]["close_code"] == 1001
 
+    assert tail["request_id"] == request_id
+    assert tail["returned"] == 2
+    assert tail["messages"][0]["seq"] == 2
+    assert tail["messages"][1]["seq"] == 3
+    assert tail["messages"][0]["direction"] == "inbound"
+    assert len(active) == 1
+    assert active[0]["id"] == request_id
+    assert active[0]["has_close_frame"] is True
+
     assert analysis["websocket_message_count"] == 4
     assert analysis["directions"] == {"outbound": 2, "inbound": 2}
     assert analysis["message_types"]["text"] == 2
@@ -145,5 +170,7 @@ def test_websocket_tools_and_status(tmp_path: Path, monkeypatch) -> None:
     assert status["ingest_transport"] == "http"
     assert status["supports_raw_websocket_listener"] is False
     assert status["supports_websocket_capture"] is True
+    assert status["supports_incremental_websocket_events"] is True
+    assert status["ws_events_path"] == "/ws/events"
     assert status["total_websocket_sessions"] == 1
     assert status["total_websocket_messages"] == 4
