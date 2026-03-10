@@ -92,6 +92,47 @@ def _extract_ws_events(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _ws_event_defaults(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    defaults: dict[str, Any] = {}
+    for key in (
+        "session_id",
+        "request_id",
+        "id",
+        "source",
+        "platform",
+        "reporter_host",
+        "url",
+        "method",
+        "status",
+        "status_text",
+        "session_started_at",
+    ):
+        if key in payload:
+            defaults[key] = payload[key]
+    for key in ("session", "request", "response", "raw_session"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            defaults[key] = value
+    return defaults
+
+
+def _merge_event_with_defaults(event: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    if not defaults:
+        return event
+    merged = dict(defaults)
+    merged.update(event)
+    for nested_key in ("session", "request", "response", "raw_session"):
+        base = defaults.get(nested_key)
+        current = event.get(nested_key)
+        if isinstance(base, dict) and isinstance(current, dict):
+            nested_merged = dict(base)
+            nested_merged.update(current)
+            merged[nested_key] = nested_merged
+    return merged
+
+
 def _normalize_headers(value: Any) -> dict[str, list[str]]:
     headers: dict[str, list[str]] = {}
     if isinstance(value, dict):
@@ -686,6 +727,52 @@ class RequestStorage:
         ).fetchone()
         return int(row["seq"] or 0) + 1 if row is not None else 1
 
+    def _find_duplicate_ws_seq_by_content(
+        self,
+        conn: sqlite3.Connection,
+        request_id: str,
+        message: dict[str, Any],
+    ) -> int | None:
+        raw_json = _json_dumps(message.get("raw"))
+        if raw_json not in ("null", ""):
+            row = conn.execute(
+                """
+                SELECT seq
+                FROM websocket_messages
+                WHERE request_id = ?
+                  AND raw_message_json = ?
+                ORDER BY seq DESC
+                LIMIT 1
+                """,
+                (request_id, raw_json),
+            ).fetchone()
+            if row is not None:
+                return int(row["seq"])
+
+        row = conn.execute(
+            """
+            SELECT seq
+            FROM websocket_messages
+            WHERE request_id = ?
+              AND COALESCE(timestamp, '') = COALESCE(?, '')
+              AND direction = ?
+              AND COALESCE(opcode, -1) = COALESCE(?, -1)
+              AND COALESCE(message_type, '') = COALESCE(?, '')
+              AND COALESCE(data, '') = COALESCE(?, '')
+            ORDER BY seq DESC
+            LIMIT 1
+            """,
+            (
+                request_id,
+                message["timestamp"],
+                message["direction"],
+                message["opcode"],
+                message["message_type"],
+                message["data"],
+            ),
+        ).fetchone()
+        return int(row["seq"]) if row is not None else None
+
     def _append_websocket_message(
         self,
         conn: sqlite3.Connection,
@@ -703,30 +790,43 @@ class RequestStorage:
         ).fetchone()
 
         if existing is None:
-            conn.execute(
-                """
-                INSERT INTO websocket_messages(
-                    request_id, seq, direction, timestamp, opcode, message_type,
-                    data, data_json, is_binary, encoding, body_truncated, raw_message_json
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO websocket_messages(
+                        request_id, seq, direction, timestamp, opcode, message_type,
+                        data, data_json, is_binary, encoding, body_truncated, raw_message_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        message["seq"],
+                        message["direction"],
+                        message["timestamp"],
+                        message["opcode"],
+                        message["message_type"],
+                        message["data"],
+                        _json_dumps(message["data_json"]),
+                        int(message["is_binary"]),
+                        message["encoding"],
+                        int(message["body_truncated"]),
+                        _json_dumps(message.get("raw")),
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    message["seq"],
-                    message["direction"],
-                    message["timestamp"],
-                    message["opcode"],
-                    message["message_type"],
-                    message["data"],
-                    _json_dumps(message["data_json"]),
-                    int(message["is_binary"]),
-                    message["encoding"],
-                    int(message["body_truncated"]),
-                    _json_dumps(message.get("raw")),
-                ),
-            )
-            return "inserted"
+                return "inserted"
+            except sqlite3.IntegrityError:
+                existing = conn.execute(
+                    """
+                    SELECT direction, timestamp, opcode, message_type, data, data_json,
+                           is_binary, encoding, body_truncated, raw_message_json
+                    FROM websocket_messages
+                    WHERE request_id = ? AND seq = ?
+                    """,
+                    (request_id, message["seq"]),
+                ).fetchone()
+                if existing is None:
+                    raise
 
         merged_direction = existing["direction"]
         if merged_direction == "unknown" and message["direction"] != "unknown":
@@ -857,6 +957,7 @@ class RequestStorage:
         reporter_host: str | None = None,
     ) -> dict[str, int]:
         events = _extract_ws_events(payload)
+        payload_defaults = _ws_event_defaults(payload)
         if not events:
             self.add_event("warning", "No valid WebSocket events found in payload")
             return {
@@ -877,42 +978,60 @@ class RequestStorage:
         inserted_messages = 0
         updated_messages = 0
         duplicate_messages = 0
+        session_upsert_fields = {
+            "session",
+            "request",
+            "response",
+            "raw_session",
+            "url",
+            "method",
+            "status",
+            "status_text",
+            "session_started_at",
+        }
+        session_seen: set[str] = set()
 
         with self._connect() as conn:
             for event in events:
-                session_obj = event.get("session")
+                merged_event = _merge_event_with_defaults(event, payload_defaults)
+                session_obj = merged_event.get("session")
                 session_id_fallback = session_obj.get("id") if isinstance(session_obj, dict) else None
                 request_id = _event_id(
-                    event.get("session_id")
-                    or event.get("request_id")
-                    or event.get("id")
+                    merged_event.get("session_id")
+                    or merged_event.get("request_id")
+                    or merged_event.get("id")
                     or session_id_fallback
                 )
                 if not request_id:
                     rejected_events += 1
                     continue
 
-                existing_row = conn.execute(
-                    "SELECT * FROM requests WHERE id = ?",
-                    (request_id,),
-                ).fetchone()
-                record = self._build_ws_session_record(
-                    event=event,
-                    request_id=request_id,
-                    source=source,
-                    platform=platform,
-                    reporter_host=reporter_host,
-                    existing_row=existing_row,
+                should_upsert_session = request_id not in session_seen or any(
+                    key in event for key in session_upsert_fields
                 )
-                was_existing = self._upsert_request_record(conn, record)
-                if was_existing:
-                    updated_sessions += 1
-                else:
-                    inserted_sessions += 1
+                if should_upsert_session:
+                    existing_row = conn.execute(
+                        "SELECT * FROM requests WHERE id = ?",
+                        (request_id,),
+                    ).fetchone()
+                    record = self._build_ws_session_record(
+                        event=merged_event,
+                        request_id=request_id,
+                        source=source,
+                        platform=platform,
+                        reporter_host=reporter_host,
+                        existing_row=existing_row,
+                    )
+                    was_existing = self._upsert_request_record(conn, record)
+                    if was_existing:
+                        updated_sessions += 1
+                    else:
+                        inserted_sessions += 1
+                    session_seen.add(request_id)
 
-                raw_frames = self._extract_ws_event_frames(event)
-                event_seq = _safe_int(event.get("seq"))
-                if not raw_frames and _event_type(event) in {"open", "connected"}:
+                raw_frames = self._extract_ws_event_frames(merged_event)
+                event_seq = _safe_int(merged_event.get("seq"))
+                if not raw_frames and _event_type(merged_event) in {"open", "connected"}:
                     accepted_events += 1
                     continue
 
@@ -923,16 +1042,26 @@ class RequestStorage:
                 next_seq = self._next_ws_seq(conn, request_id)
                 for index, raw_frame in enumerate(raw_frames):
                     seq = _safe_int(raw_frame.get("seq"))
+                    is_auto_seq = False
                     if seq is None and event_seq is not None:
                         seq = event_seq + index
                     if seq is None or seq <= 0:
                         seq = next_seq
                         next_seq += 1
+                        is_auto_seq = True
                     normalized = normalize_websocket_message(
                         raw_frame,
                         max_body_size=self.max_body_size,
                         seq=seq,
                     )
+                    if is_auto_seq:
+                        duplicate_seq = self._find_duplicate_ws_seq_by_content(
+                            conn=conn,
+                            request_id=request_id,
+                            message=normalized,
+                        )
+                        if duplicate_seq is not None:
+                            normalized["seq"] = duplicate_seq
                     action = self._append_websocket_message(
                         conn=conn,
                         request_id=request_id,
@@ -1562,6 +1691,11 @@ class RequestStorage:
             ordered_rows = list(reversed(rows))
         else:
             ordered_rows = list(rows)
+        scanned_until_seq = (
+            int(ordered_rows[-1]["seq"])
+            if ordered_rows
+            else normalized_after_seq
+        )
 
         messages: list[dict[str, Any]] = []
         for row in ordered_rows:
@@ -1592,12 +1726,13 @@ class RequestStorage:
             if len(messages) >= normalized_limit:
                 break
 
-        next_after_seq = messages[-1]["seq"] if messages else normalized_after_seq
+        next_after_seq = messages[-1]["seq"] if messages else scanned_until_seq
         return {
             "request_id": normalized_request_id,
             "after_seq": normalized_after_seq,
             "returned": len(messages),
             "next_after_seq": next_after_seq,
+            "scanned_until_seq": scanned_until_seq,
             "messages": messages,
         }
 

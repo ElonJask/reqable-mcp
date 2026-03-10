@@ -481,6 +481,129 @@ def test_ingest_websocket_events_tail_and_active_sessions(tmp_path: Path) -> Non
     assert "ws-live-2" in ids
 
 
+def test_ingest_websocket_events_supports_top_level_defaults(tmp_path: Path) -> None:
+    storage = RequestStorage(
+        db_path=tmp_path / "requests.db",
+        max_body_size=102400,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=7,
+    )
+
+    payload = {
+        "session_id": "ws-default-1",
+        "request": {
+            "method": "GET",
+            "url": "wss://ws.example.com/defaults",
+            "headers": [
+                {"name": "Connection", "value": "Upgrade"},
+                {"name": "Upgrade", "value": "websocket"},
+            ],
+        },
+        "response": {"status": 101},
+        "events": [
+            {"event_type": "open"},
+            {
+                "event_type": "message",
+                "seq": 1,
+                "direction": "inbound",
+                "opcode": 1,
+                "payload_text": '{"event":"hello"}',
+            },
+        ],
+    }
+
+    result = storage.ingest_websocket_events(payload=payload, source="report_server_ws_events")
+    assert result["received_events"] == 2
+    assert result["accepted_events"] == 2
+    assert result["rejected_events"] == 0
+    assert result["inserted_sessions"] == 1
+    assert result["updated_sessions"] == 0
+    assert result["inserted_messages"] == 1
+
+    session = storage.get_request_by_id("ws-default-1", detail_level=DetailLevel.FULL)
+    assert session is not None
+    assert session.is_websocket is True
+    assert session.url == "wss://ws.example.com/defaults"
+    assert session.websocket_message_count == 1
+
+
+def test_ingest_websocket_events_deduplicates_auto_seq_retries(tmp_path: Path) -> None:
+    storage = RequestStorage(
+        db_path=tmp_path / "requests.db",
+        max_body_size=102400,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=7,
+    )
+
+    payload = {
+        "events": [
+            {
+                "session_id": "ws-retry-1",
+                "event_type": "open",
+                "request": {"method": "GET", "url": "wss://ws.example.com/retry"},
+                "response": {"status": 101},
+            },
+            {
+                "session_id": "ws-retry-1",
+                "event_type": "message",
+                "direction": "inbound",
+                "opcode": 1,
+                "payload_text": '{"event":"retry-me"}',
+                "timestamp": "2026-03-10T12:00:00.000Z",
+            },
+        ]
+    }
+
+    first = storage.ingest_websocket_events(payload=payload, source="report_server_ws_events")
+    second = storage.ingest_websocket_events(payload=payload, source="report_server_ws_events")
+    assert first["inserted_messages"] == 1
+    assert second["duplicate_messages"] >= 1
+    assert storage.total_websocket_messages() == 1
+
+
+def test_tail_websocket_messages_advances_cursor_on_sparse_filters(tmp_path: Path) -> None:
+    storage = RequestStorage(
+        db_path=tmp_path / "requests.db",
+        max_body_size=102400,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=7,
+    )
+
+    events = [
+        {
+            "session_id": "ws-tail-1",
+            "event_type": "open",
+            "request": {"method": "GET", "url": "wss://ws.example.com/tail"},
+            "response": {"status": 101},
+        }
+    ]
+    for seq in range(1, 21):
+        events.append(
+            {
+                "session_id": "ws-tail-1",
+                "event_type": "message",
+                "seq": seq,
+                "direction": "outbound",
+                "opcode": 1,
+                "payload_text": '{"event":"only-outbound"}',
+            }
+        )
+    storage.ingest_websocket_events(payload={"events": events}, source="report_server_ws_events")
+
+    result = storage.tail_websocket_messages(
+        request_id="ws-tail-1",
+        after_seq=0,
+        direction="inbound",
+        limit=5,
+    )
+    assert result["returned"] == 0
+    assert result["scanned_until_seq"] == 20
+    assert result["next_after_seq"] == 20
+
+
 def test_websocket_health_report_and_repair(tmp_path: Path) -> None:
     storage = RequestStorage(
         db_path=tmp_path / "requests.db",

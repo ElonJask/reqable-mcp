@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hmac
 import json
 import logging
 import threading
@@ -89,7 +90,7 @@ class IngestServerManager:
                 if parsed.path != "/health":
                     self._send_json(404, {"ok": False, "error": "not_found"})
                     return
-                self._send_json(200, manager.status(include_events=False))
+                self._send_json(200, manager.public_health_status())
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
@@ -100,7 +101,7 @@ class IngestServerManager:
 
                 if manager.config.ingest_token:
                     token = self.headers.get("X-Reqable-Token", "")
-                    if token != manager.config.ingest_token:
+                    if not hmac.compare_digest(token, manager.config.ingest_token):
                         manager._failed_payloads += 1
                         self._send_json(403, {"ok": False, "error": "forbidden"})
                         return
@@ -278,3 +279,9 @@ class IngestServerManager:
         if include_events:
             result["recent_events"] = self.storage.recent_events(limit=10)
         return result
+
+    def public_health_status(self) -> dict[str, Any]:
+        status = self.status(include_events=False)
+        status.pop("db_path", None)
+        status.pop("last_error", None)
+        return status

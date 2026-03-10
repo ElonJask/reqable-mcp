@@ -6,6 +6,28 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-03-10
+
+### Fixed
+
+- WebSocket incremental ingest compatibility:
+  - Accepts top-level default session fields (`session_id`, `request`, `response`) with nested `events[]`.
+  - Prevents duplicate inserts for retry events without explicit `seq` by content-based deduplication.
+- WebSocket tail cursor robustness:
+  - `tail_websocket_messages` now returns `scanned_until_seq`.
+  - Cursor advances on sparse-filter empty windows to avoid polling stalls.
+- Ingest route safety and hardening:
+  - Rejects invalid path configurations where `REQABLE_INGEST_PATH` equals `REQABLE_WS_EVENTS_PATH`.
+  - Rejects reserved ingest paths (`/health`) for data routes.
+  - Uses constant-time token comparison (`hmac.compare_digest`).
+- Health endpoint exposure control:
+  - `/health` response no longer exposes `db_path` and `last_error`.
+
+### Changed
+
+- Incremental WS ingest performance improved by avoiding redundant per-event session upserts when session metadata is unchanged.
+- Added regression tests for all fixes above, including defaults compatibility, dedup retries, tail cursor progression, health redaction, and config path validation.
+
 ## [0.3.0] - 2026-03-10
 
 ### Added

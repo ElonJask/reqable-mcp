@@ -1,6 +1,6 @@
 {
   "name": "reqable-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "NPX launcher for reqable-mcp Python MCP server",
   "license": "MIT",
   "repository": {

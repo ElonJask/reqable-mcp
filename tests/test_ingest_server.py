@@ -185,6 +185,98 @@ def test_ingest_server_websocket_events_endpoint_roundtrip(tmp_path: Path) -> No
         manager.stop()
 
 
+def test_ingest_server_websocket_events_supports_top_level_defaults(tmp_path: Path) -> None:
+    port = _free_port()
+    cfg = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "requests.db",
+        ingest_host="127.0.0.1",
+        ingest_port=port,
+        ingest_path="/report",
+        ingest_token=None,
+        max_body_size=102400,
+        max_report_size=10 * 1024 * 1024,
+        retention_days=7,
+    )
+    storage = RequestStorage(
+        db_path=cfg.db_path,
+        max_body_size=cfg.max_body_size,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=cfg.retention_days,
+    )
+    manager = IngestServerManager(config=cfg, storage=storage)
+    manager.start()
+    try:
+        payload = {
+            "session_id": "ws-default-2",
+            "request": {"method": "GET", "url": "wss://ws.example.com/default-2"},
+            "response": {"status": 101},
+            "events": [
+                {"event_type": "open"},
+                {
+                    "event_type": "message",
+                    "seq": 1,
+                    "direction": "inbound",
+                    "opcode": 1,
+                    "payload_text": '{"event":"ok"}',
+                },
+            ],
+        }
+        raw = json.dumps(payload).encode("utf-8")
+        req = Request(
+            url=f"http://127.0.0.1:{port}/ws/events",
+            data=raw,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["ok"] is True
+        assert body["accepted_events"] == 2
+        assert body["rejected_events"] == 0
+        assert storage.total_websocket_sessions() == 1
+        assert storage.total_websocket_messages() == 1
+    finally:
+        manager.stop()
+
+
+def test_ingest_server_health_endpoint_is_redacted(tmp_path: Path) -> None:
+    port = _free_port()
+    cfg = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "requests.db",
+        ingest_host="127.0.0.1",
+        ingest_port=port,
+        ingest_path="/report",
+        ingest_token="token",
+        max_body_size=102400,
+        max_report_size=10 * 1024 * 1024,
+        retention_days=7,
+    )
+    storage = RequestStorage(
+        db_path=cfg.db_path,
+        max_body_size=cfg.max_body_size,
+        summary_body_preview_length=200,
+        key_body_preview_length=500,
+        retention_days=cfg.retention_days,
+    )
+    manager = IngestServerManager(config=cfg, storage=storage)
+    manager.start()
+    try:
+        req = Request(
+            url=f"http://127.0.0.1:{port}/health",
+            method="GET",
+        )
+        with urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["ok"] is True
+        assert "db_path" not in body
+        assert "last_error" not in body
+    finally:
+        manager.stop()
+
+
 def test_ingest_server_rejects_large_decoded_payload(tmp_path: Path) -> None:
     port = _free_port()
     cfg = Config(

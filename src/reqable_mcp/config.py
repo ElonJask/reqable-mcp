@@ -18,6 +18,7 @@ DEFAULT_MAX_BODY_SIZE = 1024 * 100  # 100KB
 DEFAULT_MAX_REPORT_SIZE = 10 * 1024 * 1024  # 10MB
 DEFAULT_MAX_IMPORT_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 DEFAULT_RETENTION_DAYS = 7
+RESERVED_INGEST_PATHS = {"/health"}
 
 
 def _read_int_env(
@@ -158,14 +159,25 @@ class Config:
 def load_config() -> Config:
     data_dir = get_data_dir()
     db_path = get_db_path()
+    ingest_path = get_ingest_path()
+    ws_events_path = get_ws_events_path()
+    if ingest_path == ws_events_path:
+        raise ValueError(
+            "REQABLE_INGEST_PATH and REQABLE_WS_EVENTS_PATH must be different paths"
+        )
+    if ingest_path in RESERVED_INGEST_PATHS or ws_events_path in RESERVED_INGEST_PATHS:
+        raise ValueError(
+            "REQABLE_INGEST_PATH and REQABLE_WS_EVENTS_PATH cannot use reserved paths: "
+            f"{sorted(RESERVED_INGEST_PATHS)}"
+        )
     return Config(
         data_dir=data_dir,
         db_path=db_path,
         ingest_host=get_ingest_host(),
         ingest_port=get_ingest_port(),
-        ingest_path=get_ingest_path(),
+        ingest_path=ingest_path,
         ingest_token=get_ingest_token(),
-        ws_events_path=get_ws_events_path(),
+        ws_events_path=ws_events_path,
         max_body_size=get_max_body_size(),
         max_report_size=get_max_report_size(),
         max_import_file_size=get_max_import_file_size(),

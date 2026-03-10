@@ -24,3 +24,23 @@ def test_get_max_import_file_size_invalid_fallback(monkeypatch) -> None:
     assert (
         config_module.get_max_import_file_size() == config_module.DEFAULT_MAX_IMPORT_FILE_SIZE
     )
+
+
+def test_load_config_rejects_same_ingest_and_ws_paths(monkeypatch) -> None:
+    monkeypatch.setenv("REQABLE_INGEST_PATH", "/same")
+    monkeypatch.setenv("REQABLE_WS_EVENTS_PATH", "/same")
+    try:
+        config_module.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "must be different paths" in str(exc)
+
+
+def test_load_config_rejects_reserved_paths(monkeypatch) -> None:
+    monkeypatch.setenv("REQABLE_INGEST_PATH", "/health")
+    monkeypatch.setenv("REQABLE_WS_EVENTS_PATH", "/ws/events")
+    try:
+        config_module.load_config()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "reserved paths" in str(exc)
